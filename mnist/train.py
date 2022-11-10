@@ -43,26 +43,36 @@ class TrainingState(NamedTuple):
 def net_fn(images: jnp.ndarray) -> jnp.ndarray:
   """Standard LeNet-300-100 MLP network."""
   x = images.astype(jnp.float32) / 255.
-  mlp = hk.Sequential([
-      hk.Flatten(),
-      hk.Linear(300), jax.nn.relu,
-      hk.Linear(100), jax.nn.relu,
-      hk.Linear(NUM_CLASSES),
-  ])
-  return mlp(x)
+  flatten = hk.Flatten()
+  logits = flatten(x)
+  l1 = model.Linear(300)
+  logits = jax.nn.relu(l1(logits))
+  l2 = model.Linear(100)
+  logits = jax.nn.relu(l2(logits))
+  output = model.Linear(NUM_CLASSES)
+  return output(logits)
 
-## TODO: Fix to perform actual rel prop. Make sure it uses MLP weights from training?
-def rel_prop(images: jnp.ndarray) -> jnp.ndarray:
+def relevence_propogation(images: jnp.ndarray, c: jnp.ndarray) -> jnp.ndarray:
   """Standard LeNet-300-100 MLP network."""
   x = images.astype(jnp.float32) / 255.
-  mlp = hk.Sequential([
-      hk.Flatten(),
-      hk.Linear(300), jax.nn.relu,
-      hk.Linear(100), jax.nn.relu,
-      hk.Linear(NUM_CLASSES),
-  ])
-  return mlp(x)
+  flatten = hk.Flatten()
+  logits = flatten(x)
 
+  l1 = model.Linear(300)
+  l2_in = jax.nn.relu(l1(logits))
+
+  l2 = model.Linear(100)
+  l3_in = jax.nn.relu(l2(l2_in))
+
+  l3 = model.Linear(NUM_CLASSES)
+  output = l3(l3_in)
+
+  r = jax.nn.one_hot(c, NUM_CLASSES)
+  r = l3.rel_prop(r, l3_in)
+  r = l2.rel_prop(r, l2_in)
+  r = l1.rel_prop(r, logits)
+
+  return jnp.reshape(r, images.shape)
 
 
 def load_dataset(
@@ -83,6 +93,7 @@ def load_dataset(
 def main(_):
   # First, make the network and optimiser.
   network = hk.without_apply_rng(hk.transform(net_fn))
+  relevence = hk.without_apply_rng(hk.transform(relevence_propogation))
   optimiser = optax.adam(1e-3)
 
   def loss(params: hk.Params, batch: Batch) -> jnp.ndarray:
@@ -129,8 +140,12 @@ def main(_):
   initial_opt_state = optimiser.init(initial_params)
   state = TrainingState(initial_params, initial_params, initial_opt_state)
 
+  # Initialize Relevence Propogation (These params will not be used, just replaced with the trained params)
+  _ = relevence.init(
+      jax.random.PRNGKey(seed=0), next(train_dataset).image, next(train_dataset).label)
+
   # Training & evaluation loop.
-  for step in range(3001):
+  for step in range(1001):
     if step % 100 == 0:
       # Periodically evaluate classification accuracy on train & test sets.
       # Note that each evaluation is only on a (large) batch.
@@ -140,6 +155,18 @@ def main(_):
 
     # Do SGD on a batch of training examples.
     state = update(state, next(train_dataset))
+
+  test_batch = next(eval_datasets["test"])
+  test_images = test_batch.image[:1]
+  test_labels = test_batch.label[:1]
+  r = relevence.apply(state.avg_params, test_images, test_labels)
+
+  with open("images.npy", "wb") as fp:
+    jnp.save(fp, test_images)
+  with open("labels.npy", "wb") as fp:
+    jnp.save(fp, test_labels)
+  with open("relevence_scores.npy", "wb") as fp:
+    jnp.save(fp, r)
 
 if __name__ == "__main__":
   app.run(main)
