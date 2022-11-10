@@ -157,16 +157,24 @@ def main(_):
     state = update(state, next(train_dataset))
 
   test_batch = next(eval_datasets["test"])
-  test_images = test_batch.image[:1]
-  test_labels = test_batch.label[:1]
-  r = relevence.apply(state.avg_params, test_images, test_labels)
+  logits = network.apply(state.avg_params, test_batch.image)
+  predictions = jnp.argmax(logits, axis=-1)
+  errors = (predictions != test_batch.label)
+  idx = errors.argmax()
+
+  test_images = test_batch.image[idx:idx+1]
+  test_labels = test_batch.label[idx:idx+1]
+  print(f"For image {idx}, predicted {predictions[idx]} correct label {test_labels}")  
+  rs = []
+  for i in range(NUM_CLASSES):
+    rs.append(relevence.apply(state.avg_params, test_images, jnp.asarray([i])))
 
   with open("images.npy", "wb") as fp:
     jnp.save(fp, test_images)
   with open("labels.npy", "wb") as fp:
     jnp.save(fp, test_labels)
   with open("relevence_scores.npy", "wb") as fp:
-    jnp.save(fp, r)
+    jnp.save(fp, jnp.asarray(rs))
 
 if __name__ == "__main__":
   app.run(main)
