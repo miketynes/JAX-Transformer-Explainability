@@ -1082,6 +1082,15 @@ class FlaxBertPredictionHeadTransform(nn.Module):
         hidden_states = self.activation(hidden_states)
         return self.LayerNorm(hidden_states)
 
+    def relprop(self, cam, hidden_states):
+        hidden_states0 = self.dense(hidden_states)
+        activation0 = self.activation(hidden_states0)
+
+        cam = self.LayerNorm.relprop(cam, activation0)
+        cam = self.activation.relprop(cam, hidden_states0)
+        cam = self.dense.relprop(cam, hidden_states)
+        return cam
+
 
 class FlaxBertLMPredictionHead(nn.Module):
     config: BertConfig
@@ -1092,6 +1101,7 @@ class FlaxBertLMPredictionHead(nn.Module):
         self.transform = FlaxBertPredictionHeadTransform(self.config, dtype=self.dtype)
         self.decoder = nn.Dense(self.config.vocab_size, dtype=self.dtype, use_bias=False)
         self.bias = self.param("bias", self.bias_init, (self.config.vocab_size,))
+        self.add = ours.Add()
 
     def __call__(self, hidden_states, shared_embedding=None):
         hidden_states = self.transform(hidden_states)
@@ -1105,6 +1115,23 @@ class FlaxBertLMPredictionHead(nn.Module):
         hidden_states += bias
         return hidden_states
 
+    def relprop(self, cam, hidden_states, shared_embedding=None):
+        # transform (hs)
+        hidden_states0 = self.transform(hidden_states)
+
+        # decoder (hs2)
+        if shared_embedding is not None:
+            hidden_states1 = self.decoder.apply({"params": {"kernel": shared_embedding.T}}, hidden_states0)
+        else:
+            hidden_states1 = self.decoder(hidden_states0)
+
+        bias = jnp.asarray(self.bias, self.dtype)
+
+        cam, _ = self.add.relprop(cam, [hidden_states1, bias])
+        cam = self.decoder.relprop(cam, hidden_states0)
+        cam = self.transform.relprop(cam, hidden_states)
+        return cam
+
 
 class FlaxBertOnlyMLMHead(nn.Module):
     config: BertConfig
@@ -1117,6 +1144,10 @@ class FlaxBertOnlyMLMHead(nn.Module):
         hidden_states = self.predictions(hidden_states, shared_embedding=shared_embedding)
         return hidden_states
 
+    def relprop(self, cam, hidden_states, shared_embedding=None):
+        cam = self.predictions.relprop(cam, hidden_states, shared_embedding)
+        return cam
+
 
 class FlaxBertOnlyNSPHead(nn.Module):
     dtype: jnp.dtype = jnp.float32
@@ -1126,6 +1157,9 @@ class FlaxBertOnlyNSPHead(nn.Module):
 
     def __call__(self, pooled_output):
         return self.seq_relationship(pooled_output)
+
+    def relprop(self, cam, pooled_output):
+        return self.seq_relationship.relprop(cam, pooled_output)
 
 
 class FlaxBertPreTrainingHeads(nn.Module):
@@ -1140,6 +1174,10 @@ class FlaxBertPreTrainingHeads(nn.Module):
         prediction_scores = self.predictions(hidden_states, shared_embedding=shared_embedding)
         seq_relationship_score = self.seq_relationship(pooled_output)
         return prediction_scores, seq_relationship_score
+
+    def relprop(self, cam, hidden_states, pooled_output, shared_embedding=None):
+        pass
+
 
 
 class FlaxBertPreTrainedModel(FlaxPreTrainedModel):
