@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified by Alok Kamatar, Mike Tynes and Wenyi Wang to implement relevence propogation
 
 from typing import Callable, Optional, Tuple
 
@@ -61,7 +63,7 @@ _TOKENIZER_FOR_DOC = "BertTokenizer"
 ACT2FN = {
     "relu": ours.ReLU,
     "tanh": ours.Tanh,
-    "gelu": ours.GELU,
+    "gelu": ours.GeLU,
 }
 
 remat = nn_partitioning.remat
@@ -216,8 +218,8 @@ class FlaxBertEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids.astype("i4"))
 
         # Sum all embeddings
-        hidden_states = self.add1([inputs_embeds, token_type_embeddings])
-        hidden_states = self.add2([hidden_states, position_embeds])
+        hidden_states = self.add1(inputs_embeds, token_type_embeddings)
+        hidden_states = self.add2(hidden_states, position_embeds)
 
         # Layer Norm
         hidden_states = self.LayerNorm(hidden_states)
@@ -230,17 +232,17 @@ class FlaxBertEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids.astype("i4"))
 
         # Sum all embeddings
-        hidden_states = self.add1([inputs_embeds, token_type_embeddings])
-        hidden_states = self.add2([hidden_states, position_embeds])
+        hidden_states = self.add1(inputs_embeds, token_type_embeddings)
+        hidden_states = self.add2(hidden_states, position_embeds)
 
         # Layer Norm
         ln_output = self.LayerNorm(hidden_states)
 
-        cam = self.dropout.relprop(cam, ln_output, **kwargs)
-        cam = self.LayerNorm.relprop(cam, hidden_states, **kwargs)
+        cam = self.dropout.relprop(cam, ln_output)
+        cam = self.LayerNorm.relprop(cam, hidden_states)
 
         # [inputs_embeds, position_embeddings, token_type_embeddings]
-        (cam) = self.add2.relprop(cam, [hidden_states, position_embeddings])
+        (cam) = self.add2.relprop(cam, hidden_states, position_embeds)
 
         return cam
 
@@ -279,13 +281,13 @@ class FlaxBertSelfAttention(nn.Module):
                 jnp.ones((1, self.config.max_position_embeddings), dtype="bool"), dtype="bool"
             )
 
+        self.einsum = ours.einsum("...qhd,...khd->...hqk")
         self.einsum1 = ours.einsum("...hqk,h->...hqk")
         self.einsum2 = ours.einsum("...hqk,...khd->...qhd")
 
-        self.matmul = ours.MatMul()
         self.add = ours.Add()
         self.softmax = ours.Softmax()
-        self.dropout(rate = self.config.attention_probs_dropout_prob,)
+        self.dropout = ours.Dropout(rate = self.config.attention_probs_dropout_prob,)
 
     def _split_heads(self, hidden_states):
         return hidden_states.reshape(hidden_states.shape[:2] + (self.config.num_attention_heads, self.head_dim))
@@ -492,10 +494,13 @@ class FlaxBertSelfAttention(nn.Module):
         else:
             attention_bias = None
 
-        attention_scores_raw = self.matmul([query_states, key_states.transpose(-1, -2)])
+        attention_scores_raw = self.einsum(query_states, key_states)
         attention_scores_normalize = attention_scores_raw / jnp.sqrt(self.head_dim)
+
         if attention_bias is not None:
-            attention_scores = self.add([attention_scores_normalize, attention_bias])
+            attention_scores = self.add(attention_scores_normalize, attention_bias)
+        else:
+            attention_scores = attention_scores_normalize
 
         attention_probs = self.softmax(attention_scores)
         attn_weights = self.dropout(attention_probs, deterministic=deterministic)
@@ -510,7 +515,7 @@ class FlaxBertSelfAttention(nn.Module):
         attn_output = attn_output.reshape(attn_output.shape[:2] + (-1,))
 
         cam = self._split_heads(cam)
-        (cam1, cam2) = self.einsum2.relprop(cam, attn_weights_masked, layer_head_mask)
+        (cam1, cam2) = self.einsum2.relprop(cam, attn_weights_masked, value_states)
         cam1 /= 2
         cam2 /= 2
 
@@ -523,9 +528,9 @@ class FlaxBertSelfAttention(nn.Module):
         cam1 = self.softmax.relprop(cam1, attention_scores)
 
         if attention_bias is not None:
-            (cam1, _) = self.add.relprop(cam1, [attention_scores_normalize, attention_bias])
+            (cam1, _) = self.add.relprop(cam1, attention_scores_normalize, attention_bias)
         
-        (cam1_1, cam1_2) = self.matmul.replrop(cam1, [query_states, key_states.transpose(-1, -2)])
+        (cam1_1, cam1_2) = self.einsum.relprop(cam1, query_states, key_states)
         cam1_1 /= 2
         cam1_2 /= 2
 
@@ -533,7 +538,7 @@ class FlaxBertSelfAttention(nn.Module):
         cam1_1 = self.query.relprop(cam1_1, hidden_states)
 
         # key and value
-        cam1_2 = self._merge_heads(cam1_2.transpose(-1, -2))
+        cam1_2 = self._merge_heads(cam1_2.transpose(0,1,3,2))
         cam2 = self._merge_heads(cam2)
 
         if is_cross_attention:
@@ -575,11 +580,11 @@ class FlaxBertSelfOutput(nn.Module):
     def relprop(self, cam, hidden_states, input_tensor, deterministic: bool = True):
         dense_out = self.dense(hidden_states)
         dropout_out = self.dropout(dense_out, deterministic=deterministic)
-        layernorm_in = self.add([dropout_out, input_tensor])
+        layernorm_in = self.add(dropout_out, input_tensor)
         output = self.LayerNorm(layernorm_in)
         
-        cam = self.Layernorm.relprop(cam, layernorm_in)
-        (cam1, cam2) = self.add.relprop(cam, [dropout_out, input_tensor])
+        cam = self.LayerNorm.relprop(cam, layernorm_in)
+        (cam1, cam2) = self.add.relprop(cam, dropout_out, input_tensor)
         cam1 = self.dropout.relprop(cam1, dense_out)
         cam1 = self.dense.relprop(cam1, hidden_states)
 
@@ -647,8 +652,6 @@ class FlaxBertAttention(nn.Module):
             output_attentions=output_attentions,
         )
         attn_output = attn_outputs[0]
-        hidden_states = self.output(attn_output, hidden_states, deterministic=deterministic)
-
         (cam1, cam2) = self.output.relprop(cam, attn_output, hidden_states, deterministic=deterministic)
         cam1 = self.self.relprop(
             cam1,
@@ -712,7 +715,7 @@ class FlaxBertOutput(nn.Module):
     def relprop(self, cam, hidden_states, attention_output, deterministic: bool = True):
         dense_out = self.dense(hidden_states)
         dropout_out = self.dropout(dense_out, deterministic=deterministic)
-        layernorm_in = self.add([dropout_out, attention_output])
+        layernorm_in = self.add(dropout_out, attention_output)
         output = self.LayerNorm(layernorm_in)
         
         cam = self.Layernorm.relprop(cam, layernorm_in)

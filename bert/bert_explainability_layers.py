@@ -43,11 +43,21 @@ class LayerNorm(nn.LayerNorm, RelProp):
 class Dropout(nn.Dropout, RelProp):
     pass
 
-class Sofmax(nn.Softmax, RelProp):
-    pass
+class Softmax(RelProp):
+    def __call__(self, input):
+        return nn.softmax(input)
 
-class Tanh(nn.Tanh, RelProp):
-    pass
+class Tanh(RelProp):
+    def __call__(self, input):
+        return nn.tanh(input)
+
+class ReLU(RelProp):
+    def __call__(self, input):
+        return nn.relu(input)
+
+class GeLU(RelProp):
+    def __call__(self, input):
+        return nn.gelu(input)
 
 ## Verified in jupyter notebook
 class MatMul(RelPropSimple):
@@ -88,9 +98,9 @@ class Add(RelPropSimple):
         return outputs
 
 # Verified in Haiku (not yet in Flax, but I don't know why it would change)
-class Dense(fnn.Dense, RelProp):
+class Dense(nn.Dense, RelProp):
     def relprop(self, R, *inputs, alpha=1):
-        inputs = inputs[0]
+        x = inputs[0]
         beta = alpha - 1
         j, k = x.shape[-1], self.features
         w = self.variables["params"]["kernel"]
