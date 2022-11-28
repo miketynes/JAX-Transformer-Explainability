@@ -1176,10 +1176,13 @@ class FlaxBertPreTrainingHeads(nn.Module):
         return prediction_scores, seq_relationship_score
 
     def relprop(self, cam, hidden_states, pooled_output, shared_embedding=None):
+        # TODO: how to handle multiple output?
         pass
 
 
-
+'''
+Following the paper's implementation, we don't need to implement it?
+'''
 class FlaxBertPreTrainedModel(FlaxPreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
@@ -1444,6 +1447,11 @@ class FlaxBertModule(nn.Module):
             attentions=outputs.attentions,
             cross_attentions=outputs.cross_attentions,
         )
+    def relporop(self, cam, **kwargs):
+        cam = self.pooler.relprop(cam, **kwargs)
+        cam = self.encoder.relprop(cam, **kwargs)
+        return cam
+
 
 
 @add_start_docstrings(
