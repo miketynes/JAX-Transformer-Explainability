@@ -1176,8 +1176,10 @@ class FlaxBertPreTrainingHeads(nn.Module):
         return prediction_scores, seq_relationship_score
 
     def relprop(self, cam, hidden_states, pooled_output, shared_embedding=None):
-        # TODO: how to handle multiple output?
-        pass
+        (cam1, cam2) = cam
+        cam1 = self.predictions.relprop(cam1, hidden_states, shared_embedding=shared_embedding)
+        cam2 = self.seq_relationship.relprop(cam2, pooled_output)
+        return cam1, cam2
 
 
 '''
