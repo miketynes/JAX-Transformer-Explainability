@@ -218,8 +218,8 @@ class FlaxBertEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids.astype("i4"))
 
         # Sum all embeddings
-        hidden_states = self.add1(inputs_embeds, token_type_embeddings)
-        hidden_states = self.add2(hidden_states, position_embeds)
+        hidden_states = self.add1(position_embeds, token_type_embeddings)
+        hidden_states = self.add2(hidden_states, inputs_embeds)
 
         # Layer Norm
         hidden_states = self.LayerNorm(hidden_states)
@@ -232,8 +232,8 @@ class FlaxBertEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids.astype("i4"))
 
         # Sum all embeddings
-        hidden_states = self.add1(inputs_embeds, token_type_embeddings)
-        hidden_states = self.add2(hidden_states, position_embeds)
+        hidden_states = self.add1(position_embeds, token_type_embeddings)
+        hidden_states = self.add2(hidden_states, inputs_embeds)
 
         # Layer Norm
         ln_output = self.LayerNorm(hidden_states)
@@ -242,7 +242,7 @@ class FlaxBertEmbeddings(nn.Module):
         cam = self.LayerNorm.relprop(cam, hidden_states)
 
         # [inputs_embeds, position_embeddings, token_type_embeddings]
-        (cam) = self.add2.relprop(cam, hidden_states, position_embeds)
+        (cam) = self.add2.relprop(cam, hidden_states, inputs_embeds)
 
         return cam
 
@@ -951,15 +951,14 @@ class FlaxBertLayerCollection(nn.Module):
                 encoder_attention_mask,
                 init_cache,
                 deterministic,
-                output_attentions,
             )
 
             hidden_states = layer_outputs[0]
 
-        for i, layer in reversed(enumerate(self.layers)):
+        for i, layer in reversed(list(enumerate(self.layers))):
             cam = layer.relprop(
                 cam,
-                hidden_states[i],
+                all_hidden_states[i],
                 attention_mask,
                 head_mask[i] if head_mask is not None else None,
                 encoder_hidden_states,
@@ -1043,25 +1042,22 @@ class FlaxBertPooler(nn.Module):
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             dtype=self.dtype,
         )
-        self.activation = ours.tanh()
+        self.activation = ours.Tanh()
         self.pool = ours.IndexSelect()
 
 
     def __call__(self, hidden_states):
-        first_token_tensor = self.pool(hidden_states, 1, 0)
-        cls_hidden_state = first_token_tensor.squeeze(1)
-        cls_hidden_state = self.dense(cls_hidden_state)
-        return self.activation(cls_hidden_state)
+        cls_hidden_state = self.pool(hidden_states, 1, 0)
+        logits = self.dense(cls_hidden_state)
+        return self.activation(logits)
 
     def relprop(self, cam, hidden_states):
-        first_token_tensor = self.pool(hidden_states, 1, 0)
-        cls_hidden_state = first_token_tensor.squeeze(1)
+        cls_hidden_state = self.pool(hidden_states, 1, 0)
         logits = self.dense(cls_hidden_state)
         
         cam = self.activation.relprop(cam, logits)
         cam = self.dense.relprop(cam, cls_hidden_state)
-        cam = cam.unsqueeze(1)
-        cam = cam.pool.relprop(cam, hidden_states, 1, 0)
+        cam = self.pool.relprop(cam, hidden_states, 1, 0)
 
         return cam
 
@@ -1072,7 +1068,7 @@ class FlaxBertPredictionHeadTransform(nn.Module):
 
     def setup(self):
         self.dense = nn.Dense(self.config.hidden_size, dtype=self.dtype)
-        self.activation = ACT2FN[self.config.hidden_act]
+        self.activation = ACT2FN[self.config.hidden_act]()
         self.LayerNorm = nn.LayerNorm(epsilon=self.config.layer_norm_eps, dtype=self.dtype)
 
     def __call__(self, hidden_states):
@@ -1447,9 +1443,57 @@ class FlaxBertModule(nn.Module):
             attentions=outputs.attentions,
             cross_attentions=outputs.cross_attentions,
         )
-    def relporop(self, cam, **kwargs):
-        cam = self.pooler.relprop(cam, **kwargs)
-        cam = self.encoder.relprop(cam, **kwargs)
+    def relprop(self, 
+        cam,
+        input_ids,
+        attention_mask,
+        token_type_ids: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
+        head_mask: Optional[jnp.ndarray] = None,
+        encoder_hidden_states: Optional[jnp.ndarray] = None,
+        encoder_attention_mask: Optional[jnp.ndarray] = None,
+        init_cache: bool = False,
+        deterministic: bool = True,
+    ):
+
+        # make sure `token_type_ids` is correctly initialized when not passed
+        if token_type_ids is None:
+            token_type_ids = jnp.zeros_like(input_ids)
+
+        # make sure `position_ids` is correctly initialized when not passed
+        if position_ids is None:
+            position_ids = jnp.broadcast_to(jnp.arange(jnp.atleast_2d(input_ids).shape[-1]), input_ids.shape)
+
+        hidden_states = self.embeddings(
+            input_ids, token_type_ids, position_ids, attention_mask, deterministic=deterministic
+        )
+        outputs = self.encoder(
+            hidden_states,
+            attention_mask,
+            head_mask=head_mask,
+            deterministic=deterministic,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            init_cache=init_cache
+        )
+        hidden_states_2 = outputs[0]
+        pooled = self.pooler(hidden_states_2) if self.add_pooling_layer else None
+
+        cam = self.pooler.relprop(cam, hidden_states_2) if self.add_pooling_layer else cam
+        cam = self.encoder.relprop(
+            cam,
+            hidden_states,
+            attention_mask,
+            head_mask=head_mask,
+            deterministic=deterministic,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            init_cache=init_cache
+        )
+        cam = self.embeddings.relprop(
+            cam, input_ids, token_type_ids, position_ids, attention_mask, deterministic=deterministic
+        )
+
         return cam
 
 
