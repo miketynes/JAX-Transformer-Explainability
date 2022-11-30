@@ -1373,6 +1373,82 @@ class FlaxBertPreTrainedModel(FlaxPreTrainedModel):
 
         return outputs
 
+    def relprop(
+        self,
+        cam,
+        input_ids,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        params: dict = None,
+        dropout_rng: jax.random.PRNGKey = None,
+        past_key_values: dict = None,
+    ):
+        # init input tensors if not passed
+        if token_type_ids is None:
+            token_type_ids = jnp.zeros_like(input_ids)
+
+        if position_ids is None:
+            position_ids = jnp.broadcast_to(jnp.arange(jnp.atleast_2d(input_ids).shape[-1]), input_ids.shape)
+
+        if attention_mask is None:
+            attention_mask = jnp.ones_like(input_ids)
+
+        if head_mask is None:
+            head_mask = jnp.ones((self.config.num_hidden_layers, self.config.num_attention_heads))
+
+        # Handle any PRNG if needed
+        rngs = {}
+        if dropout_rng is not None:
+            rngs["dropout"] = dropout_rng
+
+        inputs = {"params": params or self.params}
+
+        if self.config.add_cross_attention:
+            # if past_key_values are passed then cache is already initialized a private flag init_cache has to be passed
+            # down to ensure cache is used. It has to be made sure that cache is marked as mutable so that it can be
+            # changed by FlaxBertAttention module
+            if past_key_values:
+                inputs["cache"] = past_key_values
+                mutable = ["cache"]
+            else:
+                mutable = False
+
+            output = self.module.apply(
+                inputs,
+                cam,
+                input_ids,
+                attention_mask,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                deterministic=True,
+                rngs=rngs,
+                mutable=mutable,
+                method=self.module.relprop
+            )
+
+        else:
+            output = self.module.apply(
+                inputs,
+                cam,
+                input_ids,
+                attention_mask,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                deterministic=True,
+                rngs=rngs,
+                method=self.module.relprop
+            )
+
+        return output
+
 
 class FlaxBertModule(nn.Module):
     config: BertConfig
@@ -1788,8 +1864,8 @@ class FlaxBertForSequenceClassificationModule(nn.Module):
             if self.config.classifier_dropout is not None
             else self.config.hidden_dropout_prob
         )
-        self.dropout = nn.Dropout(rate=classifier_dropout)
-        self.classifier = nn.Dense(
+        self.dropout = ours.Dropout(rate=classifier_dropout)
+        self.classifier = ours.Dense(
             self.config.num_labels,
             dtype=self.dtype,
         )
@@ -1830,6 +1906,43 @@ class FlaxBertForSequenceClassificationModule(nn.Module):
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+        )
+    
+    def relprop(
+        self,
+        cam,
+        input_ids,
+        attention_mask,
+        token_type_ids,
+        position_ids,
+        head_mask,
+        deterministic: bool = True
+    ):
+
+        # Model
+        outputs = self.bert(
+            input_ids,
+            attention_mask,
+            token_type_ids,
+            position_ids,
+            head_mask,
+            deterministic=deterministic
+        )
+
+        bert_output = outputs[1]
+        pooled_output = self.dropout(bert_output, deterministic=deterministic)
+        logits = self.classifier(pooled_output)
+
+        cam = self.classifier.relprop(cam, pooled_output)
+        cam = self.dropout.relprop(cam, bert_output, deterministic=deterministic)
+        return self.bert.relprop(
+            cam, 
+            input_ids,
+            attention_mask, 
+            token_type_ids, 
+            position_ids,
+            head_mask,
+            deterministic=deterministic
         )
 
 
