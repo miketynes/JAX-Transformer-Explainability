@@ -233,13 +233,13 @@ class FlaxBertEmbeddings(nn.Module):
 
         # Sum all embeddings
         hidden_states = self.add1(position_embeds, token_type_embeddings)
-        hidden_states = self.add2(hidden_states, inputs_embeds)
+        hidden_states_2 = self.add2(hidden_states, inputs_embeds)
 
         # Layer Norm
-        ln_output = self.LayerNorm(hidden_states)
+        ln_output = self.LayerNorm(hidden_states_2)
 
         cam = self.dropout.relprop(cam, ln_output)
-        cam = self.LayerNorm.relprop(cam, hidden_states)
+        cam = self.LayerNorm.relprop(cam, hidden_states_2)
 
         # [inputs_embeds, position_embeddings, token_type_embeddings]
         (cam) = self.add2.relprop(cam, hidden_states, inputs_embeds)
