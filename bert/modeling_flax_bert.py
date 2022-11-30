@@ -51,7 +51,7 @@ from transformers.modeling_flax_utils import (
 from transformers.utils import ModelOutput, add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from transformers import BertConfig
 
-import bert_explainability_layers as ours
+import bert.bert_explainability_layers as ours
 
 
 logger = logging.get_logger(__name__)
@@ -243,6 +243,7 @@ class FlaxBertEmbeddings(nn.Module):
 
         # [inputs_embeds, position_embeddings, token_type_embeddings]
         (cam) = self.add2.relprop(cam, hidden_states, inputs_embeds)
+        print("relprop 2")
 
         return cam
 
@@ -808,7 +809,7 @@ class FlaxBertLayer(nn.Module):
         # Cross-Attention Block
         if encoder_hidden_states is not None:
             cross_attention_outputs = self.crossattention(
-                attention_output,
+                attention_outputs,
                 attention_mask=encoder_attention_mask,
                 layer_head_mask=layer_head_mask,
                 key_value_states=encoder_hidden_states,
@@ -1519,7 +1520,7 @@ class FlaxBertModule(nn.Module):
             attentions=outputs.attentions,
             cross_attentions=outputs.cross_attentions,
         )
-    def relprop(self, 
+    def relprop(self,
         cam,
         input_ids,
         attention_mask,
@@ -1907,7 +1908,7 @@ class FlaxBertForSequenceClassificationModule(nn.Module):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-    
+
     def relprop(
         self,
         cam,
@@ -1936,10 +1937,10 @@ class FlaxBertForSequenceClassificationModule(nn.Module):
         cam = self.classifier.relprop(cam, pooled_output)
         cam = self.dropout.relprop(cam, bert_output, deterministic=deterministic)
         return self.bert.relprop(
-            cam, 
+            cam,
             input_ids,
-            attention_mask, 
-            token_type_ids, 
+            attention_mask,
+            token_type_ids,
             position_ids,
             head_mask,
             deterministic=deterministic
