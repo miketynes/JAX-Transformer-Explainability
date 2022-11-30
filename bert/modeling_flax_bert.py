@@ -678,7 +678,7 @@ class FlaxBertIntermediate(nn.Module):
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             dtype=self.dtype,
         )
-        self.activation = ACT2FN[self.config.hidden_act]
+        self.activation = ACT2FN[self.config.hidden_act]()
 
     def __call__(self, hidden_states):
         hidden_states = self.dense(hidden_states)
@@ -688,7 +688,7 @@ class FlaxBertIntermediate(nn.Module):
     def relprop(self, cam, hidden_states):
         logits = self.dense(hidden_states)
         cam = self.activation.relprop(cam, logits)
-        cam = self.dense.relprop(can, hidden_states)
+        cam = self.dense.relprop(cam, hidden_states)
         return cam
 
 
@@ -718,8 +718,8 @@ class FlaxBertOutput(nn.Module):
         layernorm_in = self.add(dropout_out, attention_output)
         output = self.LayerNorm(layernorm_in)
         
-        cam = self.Layernorm.relprop(cam, layernorm_in)
-        (cam1, cam2) = self.add.relprop(cam, [dropout_out, attention_output])
+        cam = self.LayerNorm.relprop(cam, layernorm_in)
+        (cam1, cam2) = self.add.relprop(cam, dropout_out, attention_output)
         cam1 = self.dropout.relprop(cam1, dense_out)
         cam1 = self.dense.relprop(cam1, hidden_states)
 
@@ -819,11 +819,9 @@ class FlaxBertLayer(nn.Module):
         else:
             attention_output = self_attention_output
 
-        hidden_states = self.intermediate(attention_output)
-        hidden_states = self.output(hidden_states, attention_output, deterministic=deterministic)
-
-        (cam1, cam2) = self.output.relprop(cam, hidden_states, attention_output, deterministic=deterministic)
-        cam1 = self.intermediate.relprop(can1, attention_output)
+        hidden_states_2 = self.intermediate(attention_output)
+        (cam1, cam2) = self.output.relprop(cam, hidden_states_2, attention_output, deterministic=deterministic)
+        cam1 = self.intermediate.relprop(cam1, attention_output)
 
         cam = cam1 + cam2 ##TODO: Check clone
         if encoder_hidden_states is not None:
