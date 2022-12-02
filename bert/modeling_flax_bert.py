@@ -51,7 +51,7 @@ from transformers.modeling_flax_utils import (
 from transformers.utils import ModelOutput, add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from transformers import BertConfig
 
-import bert.bert_explainability_layers as ours
+import bert_explainability_layers as ours
 
 
 logger = logging.get_logger(__name__)
@@ -396,6 +396,7 @@ class FlaxBertSelfAttention(nn.Module):
                 jnp.full(attention_mask.shape, 0.0).astype(self.dtype),
                 jnp.full(attention_mask.shape, -1e10).astype(self.dtype),
             )
+            # attention_bias = attention_mask.astype(self.dtype)
         else:
             attention_bias = None
 
@@ -522,14 +523,12 @@ class FlaxBertSelfAttention(nn.Module):
         if layer_head_mask is not None:
             (cam1, _) = self.einsum1.relprop(cam1, attn_weights, layer_head_mask)
 
-        ## TODO: Save attention cam?
-
         cam1 = self.dropout.relprop(cam1, attention_probs, deterministic=deterministic)
         cam1 = self.softmax.relprop(cam1, attention_scores)
 
         if attention_bias is not None:
             (cam1, _) = self.add.relprop(cam1, attention_scores_normalize, attention_bias)
-        
+
         (cam1_1, cam1_2) = self.einsum.relprop(cam1, query_states, key_states)
         cam1_1 /= 2
         cam1_2 /= 2
@@ -538,7 +537,7 @@ class FlaxBertSelfAttention(nn.Module):
         cam1_1 = self.query.relprop(cam1_1, hidden_states)
 
         # key and value
-        cam1_2 = self._merge_heads(cam1_2.transpose(0,1,3,2))
+        cam1_2 = self._merge_heads(cam1_2)
         cam2 = self._merge_heads(cam2)
 
         if is_cross_attention:
@@ -803,7 +802,6 @@ class FlaxBertLayer(nn.Module):
             deterministic=deterministic,
             output_attentions=output_attentions,
         )
-        self_attention_output = attention_outputs[0]
 
         # Cross-Attention Block
         if encoder_hidden_states is not None:
@@ -817,7 +815,7 @@ class FlaxBertLayer(nn.Module):
             )
             attention_output = cross_attention_outputs[0]
         else:
-            attention_output = self_attention_output
+            attention_output = attention_outputs[0]
 
         hidden_states_2 = self.intermediate(attention_output)
         (cam1, cam2) = self.output.relprop(cam, hidden_states_2, attention_output, deterministic=deterministic)
@@ -827,7 +825,7 @@ class FlaxBertLayer(nn.Module):
         if encoder_hidden_states is not None:
             cam = self.crossattention.relprop(
                 cam,
-                self_attention_output,
+                attention_outputs,
                 attention_mask=encoder_attention_mask,
                 layer_head_mask=layer_head_mask,
                 key_value_states=encoder_hidden_states,
@@ -1556,6 +1554,7 @@ class FlaxBertModule(nn.Module):
         pooled = self.pooler(hidden_states_2) if self.add_pooling_layer else None
 
         cam = self.pooler.relprop(cam, hidden_states_2) if self.add_pooling_layer else cam
+
         cam = self.encoder.relprop(
             cam,
             hidden_states,
