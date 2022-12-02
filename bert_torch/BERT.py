@@ -60,7 +60,7 @@ class BertEmbeddings(nn.Module):
         self.add2 = Add()
 
     def forward(self, input_ids=None, token_type_ids=None, position_ids=None, inputs_embeds=None):
-        print(inputs_embeds)
+        # print(inputs_embeds)
         if input_ids is not None:
             input_shape = input_ids.size()
         else:

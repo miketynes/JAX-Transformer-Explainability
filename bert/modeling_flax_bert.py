@@ -1566,9 +1566,9 @@ class FlaxBertModule(nn.Module):
             encoder_attention_mask=encoder_attention_mask,
             init_cache=init_cache
         )
-        cam = self.embeddings.relprop(
-            cam, input_ids, token_type_ids, position_ids, attention_mask, deterministic=deterministic
-        )
+        # cam = self.embeddings.relprop(
+        #     cam, input_ids, token_type_ids, position_ids, attention_mask, deterministic=deterministic
+        # )
 
         return cam
 
