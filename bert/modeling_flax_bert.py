@@ -243,7 +243,6 @@ class FlaxBertEmbeddings(nn.Module):
 
         # [inputs_embeds, position_embeddings, token_type_embeddings]
         (cam) = self.add2.relprop(cam, hidden_states, inputs_embeds)
-        print("relprop 2")
 
         return cam
 
