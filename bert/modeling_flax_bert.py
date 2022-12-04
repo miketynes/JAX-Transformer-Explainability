@@ -53,7 +53,6 @@ from transformers import BertConfig
 
 import bert_explainability_layers as ours
 
-
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "bert-base-uncased"
@@ -295,7 +294,7 @@ class FlaxBertSelfAttention(nn.Module):
     def _merge_heads(self, hidden_states):
         return hidden_states.reshape(hidden_states.shape[:2] + (self.config.hidden_size,))
 
-    @nn.compact
+    
     # Copied from transformers.models.bart.modeling_flax_bart.FlaxBartAttention._concatenate_to_cache
     def _concatenate_to_cache(self, key, value, query, attention_mask):
         """
@@ -328,6 +327,7 @@ class FlaxBertSelfAttention(nn.Module):
             attention_mask = combine_masks(pad_mask, attention_mask)
         return key, value, attention_mask
 
+    @nn.compact
     def __call__(
         self,
         hidden_states,
@@ -415,6 +415,7 @@ class FlaxBertSelfAttention(nn.Module):
             dtype=self.dtype,
             precision=None,
         )
+        attn_weights = self.perturb("attn_weights", attn_weights)
 
         # Mask heads if we want to
         if layer_head_mask is not None:
@@ -477,12 +478,6 @@ class FlaxBertSelfAttention(nn.Module):
         elif attention_mask is not None:
             attention_mask = jnp.expand_dims(attention_mask, axis=(-3, -2))
 
-        # During fast autoregressive decoding, we feed one position at a time,
-        # and cache the keys and values step by step.
-        if self.causal and (self.has_variable("cache", "cached_key") or init_cache):
-            key_states, value_states, attention_mask = self._concatenate_to_cache(
-                key_states, value_states, query_states, attention_mask
-            )
 
         # Convert the boolean attention mask to an attention bias.
         if attention_mask is not None:
@@ -496,12 +491,12 @@ class FlaxBertSelfAttention(nn.Module):
             attention_bias = None
 
         attention_scores_raw = self.einsum(query_states, key_states)
-        attention_scores_normalize = attention_scores_raw / jnp.sqrt(self.head_dim)
+        attention_scores_normalize =  attention_scores_raw / jnp.sqrt(self.head_dim)
 
         if attention_bias is not None:
             attention_scores = self.add(attention_scores_normalize, attention_bias)
         else:
-            attention_scores = attention_scores_normalize
+            attention_scores =  attention_scores_normalize
 
         attention_probs = self.softmax(attention_scores)
         attn_weights = self.dropout(attention_probs, deterministic=deterministic)
@@ -522,6 +517,8 @@ class FlaxBertSelfAttention(nn.Module):
 
         if layer_head_mask is not None:
             (cam1, _) = self.einsum1.relprop(cam1, attn_weights, layer_head_mask)
+        
+        attn_cam = cam1
 
         cam1 = self.dropout.relprop(cam1, attention_probs, deterministic=deterministic)
         cam1 = self.softmax.relprop(cam1, attention_scores)
@@ -549,11 +546,7 @@ class FlaxBertSelfAttention(nn.Module):
             cam1_2 = self.key.relprop(cam1_2, hidden_states)
             cam2 = self.value.relprop(cam2, hidden_states)
 
-        ## TODO:Check addition is same as clone?
-        return cam1_1 + cam1_2 + cam2
-        
-
-
+        return cam1_1 + cam1_2 + cam2, attn_cam
 
 
 class FlaxBertSelfOutput(nn.Module):
@@ -652,7 +645,7 @@ class FlaxBertAttention(nn.Module):
         )
         attn_output = attn_outputs[0]
         (cam1, cam2) = self.output.relprop(cam, attn_output, hidden_states, deterministic=deterministic)
-        cam1 = self.self.relprop(
+        cam1, attn_cam = self.self.relprop(
             cam1,
             hidden_states,
             attention_mask,
@@ -664,7 +657,7 @@ class FlaxBertAttention(nn.Module):
         )
 
         ##TODO: Check that addition works for all clone inputs?
-        return cam1 + cam2
+        return cam1 + cam2, attn_cam
 
 
 class FlaxBertIntermediate(nn.Module):
@@ -823,7 +816,7 @@ class FlaxBertLayer(nn.Module):
 
         cam = cam1 + cam2 ##TODO: Check clone
         if encoder_hidden_states is not None:
-            cam = self.crossattention.relprop(
+            cam, _ = self.crossattention.relprop(
                 cam,
                 attention_outputs,
                 attention_mask=encoder_attention_mask,
@@ -833,7 +826,7 @@ class FlaxBertLayer(nn.Module):
                 output_attentions=output_attentions,
             )
         
-        cam = self.attention.relprop(
+        cam, attn_cam = self.attention.relprop(
             cam,
             hidden_states,
             attention_mask,
@@ -843,7 +836,7 @@ class FlaxBertLayer(nn.Module):
             output_attentions=output_attentions,
         )
 
-        return cam
+        return cam, attn_cam
 
 class FlaxBertLayerCollection(nn.Module):
     config: BertConfig
@@ -953,8 +946,9 @@ class FlaxBertLayerCollection(nn.Module):
 
             hidden_states = layer_outputs[0]
 
+        attn_cams = []
         for i, layer in reversed(list(enumerate(self.layers))):
-            cam = layer.relprop(
+            cam, attn_cam = layer.relprop(
                 cam,
                 all_hidden_states[i],
                 attention_mask,
@@ -964,8 +958,9 @@ class FlaxBertLayerCollection(nn.Module):
                 init_cache,
                 deterministic
             )
+            attn_cams.append(attn_cam)
 
-        return cam
+        return cam, attn_cams
 
 class FlaxBertEncoder(nn.Module):
     config: BertConfig
@@ -1243,6 +1238,7 @@ class FlaxBertPreTrainedModel(FlaxPreTrainedModel):
             )
 
         random_params = module_init_outputs["params"]
+        self.perturbs =  module_init_outputs["perturbations"]
 
         if params is not None:
             random_params = flatten_dict(unfreeze(random_params))
@@ -1285,6 +1281,7 @@ class FlaxBertPreTrainedModel(FlaxPreTrainedModel):
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         params: dict = None,
+        perturbs: dict = None,
         dropout_rng: jax.random.PRNGKey = None,
         train: bool = False,
         output_attentions: Optional[bool] = None,
@@ -1316,7 +1313,7 @@ class FlaxBertPreTrainedModel(FlaxPreTrainedModel):
         if dropout_rng is not None:
             rngs["dropout"] = dropout_rng
 
-        inputs = {"params": params or self.params}
+        inputs = {"params": params or self.params, "perturbations": perturbs or self.perturbs}
 
         if self.config.add_cross_attention:
             # if past_key_values are passed then cache is already initialized a private flag init_cache has to be passed
@@ -1403,7 +1400,7 @@ class FlaxBertPreTrainedModel(FlaxPreTrainedModel):
         if dropout_rng is not None:
             rngs["dropout"] = dropout_rng
 
-        inputs = {"params": params or self.params}
+        inputs = {"params": params or self.params, "perturbations": self.perturbs}
 
         if self.config.add_cross_attention:
             # if past_key_values are passed then cache is already initialized a private flag init_cache has to be passed
@@ -1555,7 +1552,7 @@ class FlaxBertModule(nn.Module):
 
         cam = self.pooler.relprop(cam, hidden_states_2) if self.add_pooling_layer else cam
 
-        cam = self.encoder.relprop(
+        cam, attn_cams = self.encoder.relprop(
             cam,
             hidden_states,
             attention_mask,
@@ -1569,7 +1566,7 @@ class FlaxBertModule(nn.Module):
         #     cam, input_ids, token_type_ids, position_ids, attention_mask, deterministic=deterministic
         # )
 
-        return cam
+        return cam, attn_cams
 
 
 
