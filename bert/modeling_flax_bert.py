@@ -556,8 +556,19 @@ class FlaxBertSelfAttention(nn.Module):
             cam1_2 = self.key.relprop(cam1_2, hidden_states)
             cam2 = self.value.relprop(cam2, hidden_states)
 
+        attn_grad = vgrad(lambda x: self(x, # gradient w.r.t. hidden states. Is this right?
+                                         attention_mask,
+                                         layer_head_mask,
+                                         key_value_states,
+                                         init_cache,
+                                         deterministic,
+                                         output_attentions),
+                          hidden_states[0])
+        import pdb; pdb.set_trace()
+
         ## TODO:Check addition is same as clone?
-        return cam1_1 + cam1_2 + cam2
+        cam_sum = cam1_1 + cam1_2 + cam2
+        return cam_sum
         
 
 
@@ -658,16 +669,6 @@ class FlaxBertAttention(nn.Module):
             output_attentions=output_attentions,
         )
         attn_output = attn_outputs[0]
-
-        attn_grad = vgrad(lambda x: self.self(x, # gradient w.r.t. hidden states. Is this right?
-                                              attention_mask,
-                                              layer_head_mask=layer_head_mask,
-                                              key_value_states=key_value_states,
-                                              init_cache=init_cache,
-                                              deterministic=deterministic,
-                                              output_attentions=output_attentions,
-                                              ),
-                          hidden_states[0])
         (cam1, cam2) = self.output.relprop(cam, attn_output, hidden_states, deterministic=deterministic)
         cam1 = self.self.relprop(
             cam1,
@@ -682,8 +683,6 @@ class FlaxBertAttention(nn.Module):
 
         ##TODO: Check that addition works for all clone inputs?
         cam_sum = cam1+cam2
-
-
         return cam_sum
 
 
