@@ -23,6 +23,7 @@ import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+from jax import value_and_grad
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.linen import combine_masks, make_causal_mask
 from flax.linen import partitioning as nn_partitioning
@@ -67,6 +68,12 @@ ACT2FN = {
 }
 
 remat = nn_partitioning.remat
+
+from jax import vjp
+
+def vgrad(f, x):
+  y, vjp_fn = vjp(f, x)
+  return vjp_fn(jnp.ones(y.shape))[0]
 
 @flax.struct.dataclass
 class FlaxBertForPreTrainingOutput(ModelOutput):
@@ -651,6 +658,16 @@ class FlaxBertAttention(nn.Module):
             output_attentions=output_attentions,
         )
         attn_output = attn_outputs[0]
+
+        attn_grad = vgrad(lambda x: self.self(x, # gradient w.r.t. hidden states. Is this right?
+                                              attention_mask,
+                                              layer_head_mask=layer_head_mask,
+                                              key_value_states=key_value_states,
+                                              init_cache=init_cache,
+                                              deterministic=deterministic,
+                                              output_attentions=output_attentions,
+                                              ),
+                          hidden_states[0])
         (cam1, cam2) = self.output.relprop(cam, attn_output, hidden_states, deterministic=deterministic)
         cam1 = self.self.relprop(
             cam1,
@@ -664,7 +681,10 @@ class FlaxBertAttention(nn.Module):
         )
 
         ##TODO: Check that addition works for all clone inputs?
-        return cam1 + cam2
+        cam_sum = cam1+cam2
+
+
+        return cam_sum
 
 
 class FlaxBertIntermediate(nn.Module):
