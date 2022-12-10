@@ -5,3 +5,5 @@ A JAX reimplementation of Hila Chefer **et al.**'s [Transformer Explainability](
 We learned quite a bit from this, many thanks to Chefer and colleagues for open sourcing their work! 
 
 Our reproduction of their results can be found at https://github.com/miketynes/Transformer-Explainability
+
+All of our tests and initial experiments on MNIST are found in the [nb](nb/) directory.
